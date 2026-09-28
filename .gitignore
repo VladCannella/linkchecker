@@ -1,0 +1,6 @@
+/linkcheck
+/linkcheck.exe
+*.test
+*.out
+trace.out
+reports/*.json
