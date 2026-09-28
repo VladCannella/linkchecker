@@ -3,6 +3,7 @@
 package checker
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -40,9 +41,95 @@ func getClient() *http.Client {
 
 // TODO (Этап 1): func CheckAll(urls []string) []Result — горутина на каждый URL,
 // sync.WaitGroup, закрывающая горутина go func(){ wg.Wait(); close(results) }().
+func checkone(url string) Result {
+
+	start := time.Now()
+	resp, err := http.Get(url)
+	duration := time.Since(start)
+
+	if err != nil {
+		res := Result{
+			URL:      url,
+			Duration: duration,
+			Err:      err,
+		}
+
+		return res
+	}
+
+	defer resp.Body.Close()
+	res := Result{
+		URL:      url,
+		Status:   resp.StatusCode,
+		Duration: duration,
+		Err:      err,
+	}
+	return res
+}
+
+func CheckAll(urls []string) []Result {
+	var wg sync.WaitGroup
+	var results []Result
+	resultsChan := make(chan Result)
+
+	for _, url := range urls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			ans := checkone(url)
+			resultsChan <- ans
+
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	for r := range resultsChan {
+		results = append(results, r)
+	}
+
+	return results
+
+}
 
 // TODO (Этап 2): func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result
 // — канал jobs, N воркеров (fan-out), запись в общий results (fan-in).
+
+func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result {
+	jobs := make(chan string)
+	results := make(chan Result)
+	var wg sync.WaitGroup
+
+	go func() {
+		for _, url := range urls {
+			jobs <- url
+		}
+		close(jobs)
+	}()
+
+	for i := 0; i < opts.Workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for url := range jobs {
+				checkUrl := checkone(url)
+				results <- checkUrl
+			}
+
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	return results
+
+}
 
 // TODO (Этап 3): семафор chan struct{} на хост + rate limiter на time.Ticker.
 
