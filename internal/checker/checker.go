@@ -104,10 +104,16 @@ func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result {
 	var wg sync.WaitGroup
 
 	go func() {
+		defer close(jobs)
 		for _, url := range urls {
-			jobs <- url
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- url:
+				continue
+			}
 		}
-		close(jobs)
+
 	}()
 
 	for i := 0; i < opts.Workers; i++ {
@@ -116,7 +122,12 @@ func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result {
 			defer wg.Done()
 			for url := range jobs {
 				checkUrl := checkone(url)
-				results <- checkUrl
+				select {
+				case <-ctx.Done():
+					return
+				case results <- checkUrl:
+					continue
+				}
 			}
 
 		}()
