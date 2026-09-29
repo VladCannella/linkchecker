@@ -5,6 +5,7 @@ package checker
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -39,8 +40,6 @@ func getClient() *http.Client {
 	return httpClient
 }
 
-// TODO (Этап 1): func CheckAll(urls []string) []Result — горутина на каждый URL,
-// sync.WaitGroup, закрывающая горутина go func(){ wg.Wait(); close(results) }().
 func checkone(url string) Result {
 
 	start := time.Now()
@@ -95,12 +94,20 @@ func CheckAll(urls []string) []Result {
 
 }
 
-// TODO (Этап 2): func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result
-// — канал jobs, N воркеров (fan-out), запись в общий results (fan-in).
-
 func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result {
+
 	jobs := make(chan string)
 	results := make(chan Result)
+	sem := NewSemaphore(opts.PerHost)
+
+	var tickC <-chan time.Time
+	var ticker *time.Ticker
+
+	if opts.RPS > 0 {
+		ticker = time.NewTicker(time.Second / time.Duration(opts.RPS))
+		tickC = ticker.C
+	}
+
 	var wg sync.WaitGroup
 
 	go func() {
@@ -120,8 +127,27 @@ func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for url := range jobs {
-				checkUrl := checkone(url)
+			for rawUrl := range jobs {
+				host, err := url.Parse(rawUrl)
+				if err != nil {
+					continue
+				}
+
+				if opts.RPS > 0 {
+					select {
+					case <-tickC:
+					case <-ctx.Done():
+						continue
+					}
+				}
+
+				err = sem.Acquire(ctx, host.Host)
+				if err != nil {
+					continue
+				}
+				checkUrl := checkone(rawUrl)
+				sem.Release(host.Host)
+
 				select {
 				case <-ctx.Done():
 					return
@@ -136,10 +162,59 @@ func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result {
 	go func() {
 		wg.Wait()
 		close(results)
+		if ticker != nil {
+			defer ticker.Stop()
+		}
 	}()
 
 	return results
 
+}
+
+type Semaphore struct {
+	mu    sync.Mutex
+	host  map[string]chan struct{}
+	limit int
+}
+
+func NewSemaphore(limit int) *Semaphore {
+	sem := make(map[string]chan struct{})
+	return &Semaphore{
+		host:  sem,
+		limit: limit,
+	}
+}
+
+func (s *Semaphore) Acquire(ctx context.Context, host string) error {
+	s.mu.Lock()
+
+	sem, ok := s.host[host]
+	if !ok {
+		sem = make(chan struct{}, s.limit)
+		s.host[host] = sem
+	}
+	s.mu.Unlock()
+
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+}
+
+func (s *Semaphore) Release(host string) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sem, ok := s.host[host]
+	if !ok {
+		return
+	}
+
+	<-sem
 }
 
 // TODO (Этап 3): семафор chan struct{} на хост + rate limiter на time.Ticker.
