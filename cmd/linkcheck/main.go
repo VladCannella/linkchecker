@@ -10,17 +10,22 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"linkchecker/internal/checker"
 	"os"
+	"runtime"
 )
 
 func main() {
-	workers := flag.Int("workers", 0, "worker pool size (default: runtime.NumCPU())")
+	workers := flag.Int("workers", runtime.NumCPU(), "worker pool size (default: runtime.NumCPU())")
 	rps := flag.Int("rps", 0, "requests per second (0 = unlimited)")
 	timeout := flag.Duration("timeout", 0, "overall deadline for the whole run")
 	perReq := flag.Duration("per-req", 0, "timeout for a single request")
 	out := flag.String("out", "", "output JSON report file (empty = stdout)")
+	perHost := flag.Int("per-host", 8, "request per host (default: 8)")
+	ctxMain := context.Background()
 	flag.Parse()
 
 	urls := flag.Args()
@@ -29,10 +34,33 @@ func main() {
 		os.Exit(2)
 	}
 
-	_ = workers
-	_ = rps
-	_ = timeout
-	_ = perReq
+	opts := checker.Options{
+		Workers:    *workers,
+		RPS:        *rps,
+		PerHost:    *perHost,
+		PerRequest: *perReq,
+	}
+
+	ctxWorkers, cancel := context.WithCancel(ctxMain)
+	if *timeout > 0 {
+		ctxWorkers, cancel = context.WithTimeout(ctxMain, *timeout)
+	}
+
+	defer cancel()
+
+	poolChan := checker.RunPool(ctxWorkers, urls, opts)
+	var checkerResult []checker.Result
+
+	for r := range poolChan {
+		checkerResult = append(checkerResult, checker.Result{URL: r.URL, Status: r.Status, Duration: r.Duration, Err: r.Err})
+		if r.Err != nil {
+			fmt.Printf("URL: %v, StatusCode: %v, Duration: %v, Err: %v\n", r.URL, r.Status, r.Duration, r.Err)
+			continue
+		}
+		fmt.Printf("URL: %v, StatusCode: %v, Duration: %v\n", r.URL, r.Status, r.Duration)
+
+	}
+
 	_ = out
 
 	// TODO (Этап 1): горутина на каждый URL, sync.WaitGroup, канал results.
