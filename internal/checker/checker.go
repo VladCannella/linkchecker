@@ -40,19 +40,28 @@ func getClient() *http.Client {
 	return httpClient
 }
 
-func checkone(url string) Result {
+func errResult(url string, start time.Time, err error) Result {
+	return Result{
+		URL:      url,
+		Duration: time.Since(start),
+		Err:      err,
+	}
+}
+
+func checkone(ctx context.Context, url string) Result {
 
 	start := time.Now()
-	resp, err := http.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		res := errResult(url, start, err)
+		return res
+	}
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	duration := time.Since(start)
 
 	if err != nil {
-		res := Result{
-			URL:      url,
-			Duration: duration,
-			Err:      err,
-		}
-
+		res := errResult(url, start, err)
 		return res
 	}
 
@@ -76,7 +85,10 @@ func CheckAll(urls []string) []Result {
 		go func() {
 			defer wg.Done()
 
-			ans := checkone(url)
+			ctxCheck := context.Background()
+
+			ans := checkone(ctxCheck, url)
+
 			resultsChan <- ans
 
 		}()
@@ -123,35 +135,50 @@ func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result {
 
 	}()
 
+	process := func(rawUrl string) (Result, bool) {
+		host, err := url.Parse(rawUrl)
+		if err != nil {
+			return errResult(rawUrl, time.Now(), err), true
+		}
+
+		if opts.RPS > 0 {
+			select {
+			case <-tickC:
+			case <-ctx.Done():
+				return Result{}, false
+			}
+		}
+
+		err = sem.Acquire(ctx, host.Host)
+		if err != nil {
+			return Result{}, false
+		}
+		defer sem.Release(host.Host)
+
+		reqCtx := ctx
+		cancel := func() {}
+		if opts.PerRequest > 0 {
+			reqCtx, cancel = context.WithTimeout(ctx, opts.PerRequest)
+			defer cancel()
+		}
+		checkUrl := checkone(reqCtx, rawUrl)
+		return checkUrl, true
+
+	}
+
 	for i := 0; i < opts.Workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for rawUrl := range jobs {
-				host, err := url.Parse(rawUrl)
-				if err != nil {
+				result, ok := process(rawUrl)
+				if !ok {
 					continue
 				}
-
-				if opts.RPS > 0 {
-					select {
-					case <-tickC:
-					case <-ctx.Done():
-						continue
-					}
-				}
-
-				err = sem.Acquire(ctx, host.Host)
-				if err != nil {
-					continue
-				}
-				checkUrl := checkone(rawUrl)
-				sem.Release(host.Host)
-
 				select {
 				case <-ctx.Done():
 					return
-				case results <- checkUrl:
+				case results <- result:
 					continue
 				}
 			}
@@ -216,8 +243,6 @@ func (s *Semaphore) Release(host string) {
 
 	<-sem
 }
-
-// TODO (Этап 3): семафор chan struct{} на хост + rate limiter на time.Ticker.
 
 // TODO (Этап 4): context.WithTimeout на весь прогон и на каждый запрос отдельно;
 // запрос через http.NewRequestWithContext; errors.Is(err, context.DeadlineExceeded/Canceled).
