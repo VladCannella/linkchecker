@@ -4,6 +4,8 @@ package checker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sync"
@@ -27,8 +29,9 @@ type Options struct {
 }
 
 var (
-	clientOnce sync.Once
-	httpClient *http.Client
+	clientOnce        sync.Once
+	httpClient        *http.Client
+	ErrRequestTimeout = errors.New("request timeout")
 )
 
 // getClient лениво инициализирует http.Client с настроенным транспортом.
@@ -56,7 +59,7 @@ func checkone(ctx context.Context, url string) Result {
 		res := errResult(url, start, err)
 		return res
 	}
-	client := &http.Client{}
+	client := getClient()
 	resp, err := client.Do(req)
 	duration := time.Since(start)
 
@@ -162,6 +165,11 @@ func RunPool(ctx context.Context, urls []string, opts Options) <-chan Result {
 			defer cancel()
 		}
 		checkUrl := checkone(reqCtx, rawUrl)
+
+		if checkUrl.Err != nil && errors.Is(checkUrl.Err, context.DeadlineExceeded) && ctx.Err() == nil {
+			checkUrl.Err = fmt.Errorf("%w: %w", ErrRequestTimeout, checkUrl.Err)
+		}
+
 		return checkUrl, true
 
 	}
